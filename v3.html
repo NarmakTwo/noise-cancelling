@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Audio Processing Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+            padding: 20px;
+        }
+        .container {
+            text-align: center;
+            padding: 20px;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }
+        canvas {
+            background-color: #000;
+            margin-top: 20px;
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 20px;
+        }
+        .control {
+            margin-bottom: 10px;
+        }
+        label {
+            display: inline-block;
+            width: 200px;
+            text-align: right;
+            margin-right: 10px;
+        }
+        select {
+            width: 200px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Advanced Audio Processing Demo</h1>
+        <button id="toggleButton">Start</button>
+        <div class="controls">
+            <div class="control">
+                <label for="audioInputSelect">Microphone:</label>
+                <select id="audioInputSelect"></select>
+            </div>
+            <div class="control">
+                <label for="audioOutputSelect">Speaker:</label>
+                <select id="audioOutputSelect"></select>
+            </div>
+            <div class="control">
+                <label for="modeSelect">Mode:</label>
+                <select id="modeSelect">
+                    <option value="adaptive">Adaptive</option>
+                    <option value="fixed">Fixed</option>
+                </select>
+            </div>
+            <div class="control">
+                <label for="filterLength">Filter Length:</label>
+                <input type="range" id="filterLength" min="16" max="256" step="16" value="64">
+                <span id="filterLengthValue">64</span>
+            </div>
+            <div class="control">
+                <label for="learningRate">Learning Rate:</label>
+                <input type="range" id="learningRate" min="0.01" max="0.5" step="0.01" value="0.1">
+                <span id="learningRateValue">0.1</span>
+            </div>
+            <div class="control">
+                <label for="delayLength">Delay Length:</label>
+                <input type="range" id="delayLength" min="1" max="20" step="1" value="5">
+                <span id="delayLengthValue">5</span>
+            </div>
+            <div class="control">
+                <label for="micSensitivity">Mic Sensitivity:</label>
+                <input type="range" id="micSensitivity" min="1" max="5" step="0.1" value="1">
+                <span id="micSensitivityValue">1</span>
+            </div>
+            <div class="control">
+                <label for="volumeBoost">Volume Boost:</label>
+                <input type="range" id="volumeBoost" min="1" max="5" step="0.1" value="1">
+                <span id="volumeBoostValue">1</span>
+            </div>
+            <div class="control">
+                <label for="turboMode">Turbo Mode:</label>
+                <input type="checkbox" id="turboMode">
+            </div>
+        </div>
+    </div>
+    <canvas id="visualizer" width="800" height="200"></canvas>
+
+    <script>
+        class AdaptiveNoiseFilter {
+            constructor(filterLength, learningRate) {
+                this.filterLength = filterLength;
+                this.learningRate = learningRate;
+                this.weights = new Float32Array(filterLength).fill(0);
+                this.buffer = new Float32Array(filterLength).fill(0);
+                this.fixedWeights = null;
+            }
+
+            process(primarySignal, referenceNoise, mode, turboMode) {
+                // Shift the buffer and add new sample
+                this.buffer.copyWithin(1, 0);
+                this.buffer[0] = referenceNoise;
+
+                // Calculate the estimated noise
+                let estimatedNoise = 0;
+                const weights = mode === 'fixed' ? this.fixedWeights : this.weights;
+                for (let i = 0; i < this.filterLength; i++) {
+                    estimatedNoise += weights[i] * this.buffer[i];
+                }
+
+                // Calculate the error
+                const error = primarySignal - estimatedNoise;
+
+                // Update filter weights in adaptive mode
+                if (mode === 'adaptive') {
+                    const effectiveLearningRate = turboMode ? this.learningRate * 5 : this.learningRate;
+                    for (let i = 0; i < this.filterLength; i++) {
+                        this.weights[i] += effectiveLearningRate * error * this.buffer[i];
+                    }
+                }
+
+                // Return the cleaned signal
+                return error;
+            }
+
+            updateParameters(filterLength, learningRate) {
+                this.filterLength = filterLength;
+                this.learningRate = learningRate;
+                this.weights = new Float32Array(filterLength).fill(0);
+                this.buffer = new Float32Array(filterLength).fill(0);
+            }
+
+            setFixedWeights() {
+                this.fixedWeights = new Float32Array(this.weights);
+            }
+        }
+
+        let audioContext, microphone, scriptProcessor, analyser;
+        let noiseFilter;
+        let isRunning = false;
+        let delayBuffer = [];
+
+        const toggleButton = document.getElementById('toggleButton');
+        const modeSelect = document.getElementById('modeSelect');
+        const filterLengthSlider = document.getElementById('filterLength');
+        const learningRateSlider = document.getElementById('learningRate');
+        const delayLengthSlider = document.getElementById('delayLength');
+        const micSensitivitySlider = document.getElementById('micSensitivity');
+        const volumeBoostSlider = document.getElementById('volumeBoost');
+        const turboModeCheckbox = document.getElementById('turboMode');
+        const audioInputSelect = document.getElementById('audioInputSelect');
+        const audioOutputSelect = document.getElementById('audioOutputSelect');
+        const canvas = document.getElementById('visualizer');
+        const canvasCtx = canvas.getContext('2d');
+
+        toggleButton.addEventListener('click', async () => {
+            if (!isRunning) {
+                await startNoiseReduction();
+                toggleButton.textContent = 'Stop';
+                isRunning = true;
+            } else {
+                stopNoiseReduction();
+                toggleButton.textContent = 'Start';
+                isRunning = false;
+            }
+        });
+
+        modeSelect.addEventListener('change', () => {
+            if (modeSelect.value === 'fixed' && noiseFilter) {
+                noiseFilter.setFixedWeights();
+            }
+        });
+
+        filterLengthSlider.addEventListener('input', updateFilterParameters);
+        learningRateSlider.addEventListener('input', updateFilterParameters);
+        delayLengthSlider.addEventListener('input', updateDelayLength);
+        micSensitivitySlider.addEventListener('input', updateMicSensitivity);
+        volumeBoostSlider.addEventListener('input', updateVolumeBoost);
+
+        function updateFilterParameters() {
+            const filterLength = parseInt(filterLengthSlider.value);
+            const learningRate = parseFloat(learningRateSlider.value);
+            document.getElementById('filterLengthValue').textContent = filterLength;
+            document.getElementById('learningRateValue').textContent = learningRate.toFixed(2);
+            if (noiseFilter) {
+                noiseFilter.updateParameters(filterLength, learningRate);
+            }
+        }
+
+        function updateDelayLength() {
+            const delayLength = parseInt(delayLengthSlider.value);
+            document.getElementById('delayLengthValue').textContent = delayLength;
+            delayBuffer = new Array(delayLength).fill(0);
+        }
+
+        function updateMicSensitivity() {
+            const micSensitivity = parseFloat(micSensitivitySlider.value);
+            document.getElementById('micSensitivityValue').textContent = micSensitivity.toFixed(1);
+        }
+
+        function updateVolumeBoost() {
+            const volumeBoost = parseFloat(volumeBoostSlider.value);
+            document.getElementById('volumeBoostValue').textContent = volumeBoost.toFixed(1);
+        }
+
+        async function populateDeviceSelections() {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            
+            // Clear existing options
+            audioInputSelect.innerHTML = '';
+            audioOutputSelect.innerHTML = '';
+
+            // Populate audio input devices (microphones)
+            devices.filter(device => device.kind === 'audioinput').forEach(device => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                option.text = device.label || `Microphone ${audioInputSelect.length + 1}`;
+                audioInputSelect.appendChild(option);
+            });
+
+            // Populate audio output devices (speakers)
+            devices.filter(device => device.kind === 'audiooutput').forEach(device => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                option.text = device.label || `Speaker ${audioOutputSelect.length + 1}`;
+                audioOutputSelect.appendChild(option);
+            });
+        }
+
+        populateDeviceSelections();
+        navigator.mediaDevices.addEventListener('devicechange', populateDeviceSelections);
+
+        async function startNoiseReduction() {
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        deviceId: audioInputSelect.value ? { exact: audioInputSelect.value } : undefined,
+                        echoCancellation: false,
+                        noiseSuppression: false
+                    }
+                });
+                microphone = audioContext.createMediaStreamSource(stream);
+
+                scriptProcessor = audioContext.createScriptProcessor(1024, 1, 1);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+
+                noiseFilter = new AdaptiveNoiseFilter(parseInt(filterLengthSlider.value), parseFloat(learningRateSlider.value));
+                updateDelayLength();
+
+                microphone.connect(scriptProcessor);
+                scriptProcessor.connect(analyser);
+                analyser.connect(audioContext.destination);
+
+                // Set the audio output device if supported
+                if (typeof audioContext.setSinkId === 'function') {
+                    await audioContext.setSinkId(audioOutputSelect.value);
+                }
+
+                scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
+                    const inputBuffer = audioProcessingEvent.inputBuffer;
+                    const outputBuffer = audioProcessingEvent.outputBuffer;
+
+                    const inputData = inputBuffer.getChannelData(0);
+                    const outputData = outputBuffer.getChannelData(0);
+
+                    const micSensitivity = parseFloat(micSensitivitySlider.value);
+                    const volumeBoost = parseFloat(volumeBoostSlider.value);
+
+                    for (let i = 0; i < inputData.length; i++) {
+                        const amplifiedInput = inputData[i] * micSensitivity;
+                        delayBuffer.push(amplifiedInput);
+                        const noiseReference = delayBuffer.shift();
+                        const cleanedSample = noiseFilter.process(
+                            amplifiedInput,
+                            noiseReference,
+                            modeSelect.value,
+                            turboModeCheckbox.checked
+                        );
+                        outputData[i] = cleanedSample * volumeBoost;
+                    }
+                };
+
+                drawVisualizer();
+            } catch (error) {
+                console.error('Error starting noise reduction:', error);
+            }
+        }
+
+        function stopNoiseReduction() {
+            if (audioContext) {
+                microphone.disconnect();
+                scriptProcessor.disconnect();
+                analyser.disconnect();
+                audioContext.close();
+            }
+        }
+
+        function drawVisualizer() {
+            requestAnimationFrame(drawVisualizer);
+
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            analyser.getByteFrequencyData(dataArray);
+
+            canvasCtx.fillStyle = 'rgb(0, 0, 0)';
+            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const barWidth = (canvas.width / bufferLength) * 2.5;
+            let x = 0;
+
+            for (let i = 0; i < bufferLength; i++) {
+                const barHeight = dataArray[i] / 2;
+                canvasCtx.fillStyle = `rgb(${barHeight + 100}, 50, 50)`;
+                canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                x += barWidth + 1;
+            }
+        }
+
+        audioInputSelect.addEventListener('change', () => {
+            if (isRunning) {
+                stopNoiseReduction();
+                startNoiseReduction();
+            }
+        });
+
+        audioOutputSelect.addEventListener('change', async () => {
+            if (isRunning && typeof audioContext.setSinkId === 'function') {
+                await audioContext.setSinkId(audioOutputSelect.value);
+            }
+        });
+    </script>
+</body>
+</html>

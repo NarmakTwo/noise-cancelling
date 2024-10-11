@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Frequency Processor</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+            padding: 20px;
+        }
+        .container {
+            text-align: center;
+            padding: 20px;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }
+        canvas {
+            background-color: #000;
+            margin-top: 20px;
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 20px;
+        }
+        .control {
+            margin-bottom: 10px;
+        }
+        label {
+            display: inline-block;
+            width: 200px;
+            text-align: right;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Audio Frequency Processor</h1>
+        <button id="toggleButton">Start</button>
+        <div class="controls">
+            <div class="control">
+                <label for="invertToggle">Invert Frequencies:</label>
+                <input type="checkbox" id="invertToggle">
+            </div>
+            <div class="control">
+                <label for="boostFrequency">Boost Frequency (Hz):</label>
+                <input type="range" id="boostFrequency" min="20" max="20000" step="1" value="1000">
+                <span id="boostFrequencyValue">1000 Hz</span>
+            </div>
+            <div class="control">
+                <label for="boostGain">Boost Gain:</label>
+                <input type="range" id="boostGain" min="0" max="20" step="0.1" value="0">
+                <span id="boostGainValue">0 dB</span>
+            </div>
+            <div class="control">
+                <label for="boostQ">Boost Q Factor:</label>
+                <input type="range" id="boostQ" min="0.1" max="10" step="0.1" value="1">
+                <span id="boostQValue">1</span>
+            </div>
+        </div>
+    </div>
+    <canvas id="visualizer" width="800" height="200"></canvas>
+
+    <script>
+        let audioContext;
+        let microphone;
+        let analyser;
+        let scriptProcessor;
+        let boostFilter;
+        let isRunning = false;
+
+        const toggleButton = document.getElementById('toggleButton');
+        const invertToggle = document.getElementById('invertToggle');
+        const boostFrequency = document.getElementById('boostFrequency');
+        const boostGain = document.getElementById('boostGain');
+        const boostQ = document.getElementById('boostQ');
+        const canvas = document.getElementById('visualizer');
+        const canvasCtx = canvas.getContext('2d');
+
+        toggleButton.addEventListener('click', async () => {
+            if (!isRunning) {
+                await startAudioProcessing();
+                toggleButton.textContent = 'Stop';
+                isRunning = true;
+            } else {
+                stopAudioProcessing();
+                toggleButton.textContent = 'Start';
+                isRunning = false;
+            }
+        });
+
+        boostFrequency.addEventListener('input', updateBoostFilter);
+        boostGain.addEventListener('input', updateBoostFilter);
+        boostQ.addEventListener('input', updateBoostFilter);
+
+        function updateBoostFilter() {
+            if (boostFilter) {
+                boostFilter.frequency.value = parseFloat(boostFrequency.value);
+                boostFilter.gain.value = parseFloat(boostGain.value);
+                boostFilter.Q.value = parseFloat(boostQ.value);
+            }
+            document.getElementById('boostFrequencyValue').textContent = `${boostFrequency.value} Hz`;
+            document.getElementById('boostGainValue').textContent = `${boostGain.value} dB`;
+            document.getElementById('boostQValue').textContent = boostQ.value;
+        }
+
+        async function startAudioProcessing() {
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                microphone = audioContext.createMediaStreamSource(stream);
+                
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+
+                scriptProcessor = audioContext.createScriptProcessor(2048, 1, 1);
+
+                boostFilter = audioContext.createBiquadFilter();
+                boostFilter.type = 'peaking';
+                updateBoostFilter();
+
+                microphone.connect(boostFilter);
+                boostFilter.connect(analyser);
+                analyser.connect(scriptProcessor);
+                scriptProcessor.connect(audioContext.destination);
+
+                scriptProcessor.onaudioprocess = processAudio;
+
+                drawVisualizer();
+            } catch (error) {
+                console.error('Error starting audio processing:', error);
+            }
+        }
+
+        function stopAudioProcessing() {
+            if (audioContext) {
+                microphone.disconnect();
+                boostFilter.disconnect();
+                analyser.disconnect();
+                scriptProcessor.disconnect();
+                audioContext.close();
+            }
+        }
+
+        function processAudio(audioProcessingEvent) {
+            const inputBuffer = audioProcessingEvent.inputBuffer;
+            const outputBuffer = audioProcessingEvent.outputBuffer;
+
+            const inputData = inputBuffer.getChannelData(0);
+            const outputData = outputBuffer.getChannelData(0);
+
+            if (invertToggle.checked) {
+                // Perform FFT
+                const fftSize = analyser.fftSize;
+                const dataArray = new Float32Array(fftSize);
+                analyser.getFloatTimeDomainData(dataArray);
+
+                // Create a temporary array for the FFT result
+                const tempArray = new Float32Array(fftSize);
+
+                // Perform FFT
+                const real = new Float32Array(fftSize);
+                const imag = new Float32Array(fftSize);
+                for (let i = 0; i < fftSize; i++) {
+                    real[i] = dataArray[i];
+                    imag[i] = 0;
+                }
+                FFT(real, imag);
+
+                // Invert frequencies
+                for (let i = 0; i < fftSize / 2; i++) {
+                    const temp = real[i];
+                    real[i] = real[fftSize - 1 - i];
+                    real[fftSize - 1 - i] = temp;
+
+                    const tempImag = imag[i];
+                    imag[i] = imag[fftSize - 1 - i];
+                    imag[fftSize - 1 - i] = tempImag;
+                }
+
+                // Perform inverse FFT
+                FFT(real, imag, true);
+
+                // Copy the result to the output buffer
+                for (let i = 0; i < fftSize; i++) {
+                    outputData[i] = real[i] / fftSize;
+                }
+            } else {
+                // If not inverting, just copy input to output
+                for (let i = 0; i < inputData.length; i++) {
+                    outputData[i] = inputData[i];
+                }
+            }
+        }
+
+        function FFT(real, imag, inverse = false) {
+            const n = real.length;
+            if (n <= 1) return;
+
+            const halfN = n / 2;
+            const realEven = new Float32Array(halfN);
+            const imagEven = new Float32Array(halfN);
+            const realOdd = new Float32Array(halfN);
+            const imagOdd = new Float32Array(halfN);
+
+            for (let i = 0; i < halfN; i++) {
+                realEven[i] = real[2 * i];
+                imagEven[i] = imag[2 * i];
+                realOdd[i] = real[2 * i + 1];
+                imagOdd[i] = imag[2 * i + 1];
+            }
+
+            FFT(realEven, imagEven, inverse);
+            FFT(realOdd, imagOdd, inverse);
+
+            const angle = (inverse ? 2 : -2) * Math.PI / n;
+            let wReal = 1;
+            let wImag = 0;
+
+            for (let k = 0; k < halfN; k++) {
+                const evenReal = realEven[k];
+                const evenImag = imagEven[k];
+                const oddReal = realOdd[k];
+                const oddImag = imagOdd[k];
+
+                const tReal = wReal * oddReal - wImag * oddImag;
+                const tImag = wReal * oddImag + wImag * oddReal;
+
+                real[k] = evenReal + tReal;
+                imag[k] = evenImag + tImag;
+                real[k + halfN] = evenReal - tReal;
+                imag[k + halfN] = evenImag - tImag;
+
+                const nextWReal = wReal * Math.cos(angle) - wImag * Math.sin(angle);
+                const nextWImag = wReal * Math.sin(angle) + wImag * Math.cos(angle);
+                wReal = nextWReal;
+                wImag = nextWImag;
+            }
+        }
+
+        function drawVisualizer() {
+            requestAnimationFrame(drawVisualizer);
+
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            analyser.getByteFrequencyData(dataArray);
+
+            canvasCtx.fillStyle = 'rgb(0, 0, 0)';
+            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const barWidth = (canvas.width / bufferLength) * 2.5;
+            let x = 0;
+
+            for (let i = 0; i < bufferLength; i++) {
+                const barHeight = dataArray[i] / 2;
+                canvasCtx.fillStyle = `rgb(${barHeight + 100}, 50, 50)`;
+                canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                x += barWidth + 1;
+            }
+        }
+    </script>
+</body>
+</html>
